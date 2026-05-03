@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/plugins/telegram/scripts/telegram.py hook-user-prompt",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /absolute/path/to/plugins/telegram/scripts/telegram.py hook-stop",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

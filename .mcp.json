@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "telegram": {
+      "type": "stdio",
+      "command": "./scripts/telegram_launcher.cmd",
+      "args": [
+        "mcp-serve"
+      ],
+      "cwd": ".",
+      "note": "Local Telegram notification tools for linked Bot API messaging and Codex completion alerts."
+    }
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "name": "telegram",
+  "version": "0.1.0",
+  "description": "Send Telegram notifications from Codex, including optional task-completion alerts.",
+  "author": {
+    "name": "Vayle",
+    "email": "Valorith@users.noreply.github.com",
+    "url": "https://github.com/Valorith"
+  },
+  "homepage": "https://github.com/Valorith/telegram-codex-plugin",
+  "repository": "https://github.com/Valorith/telegram-codex-plugin",
+  "license": "MIT",
+  "keywords": [
+    "telegram",
+    "notifications",
+    "bot",
+    "messaging",
+    "hooks"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Telegram",
+    "shortDescription": "Send task updates and completion alerts to Telegram",
+    "longDescription": "Link Codex to a personal Telegram bot and send polished notifications when tasks finish. Includes a guided first-time setup, direct message tools, and optional Codex hooks for automatic completion alerts.",
+    "developerName": "Vayle",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write",
+      "Notifications",
+      "Hooks"
+    ],
+    "websiteURL": "https://core.telegram.org/bots",
+    "privacyPolicyURL": "https://telegram.org/privacy",
+    "termsOfServiceURL": "https://telegram.org/tos",
+    "defaultPrompt": [
+      "Set up Telegram notifications for Codex.",
+      "Send me a Telegram when this task is done.",
+      "Send a Telegram test message."
+    ],
+    "brandColor": "#229ED9",
+    "composerIcon": "./assets/telegram-logo.svg",
+    "logo": "./assets/telegram-logo.svg",
+    "screenshots": []
+  }
+}
