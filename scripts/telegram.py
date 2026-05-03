@@ -6,6 +6,7 @@ import datetime as dt
 import getpass
 import html
 import json
+import math
 import os
 import pathlib
 import random
@@ -24,6 +25,7 @@ from typing import Any
 PLUGIN_NAME = "telegram"
 PLUGIN_VERSION = "0.1.0"
 API_ROOT = "https://api.telegram.org"
+AUTO_NOTIFY_SOURCE = "auto-threshold"
 TRIGGER_RE = re.compile(
     r"\b(telegram|tg)\b.*\b(notify|message|ping|alert|tell|let me know|send me)\b"
     r"|\b(notify|message|ping|alert|tell|let me know|send me)\b.*\b(telegram|tg)\b",
@@ -88,6 +90,64 @@ def save_config(config: dict[str, Any]) -> None:
     config = dict(config)
     config["updated_at"] = now_iso()
     write_private_json(config_path(), config)
+
+
+def is_linked(config: dict[str, Any] | None = None) -> bool:
+    config = load_config() if config is None else config
+    return bool(config.get("bot_token") and config.get("chat_id"))
+
+
+def auto_notify_minutes(config: dict[str, Any] | None = None) -> float | None:
+    config = load_config() if config is None else config
+    value = config.get("auto_notify_min_minutes")
+    if value in (None, "", False):
+        return None
+    try:
+        minutes = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(minutes) or minutes <= 0:
+        return None
+    return minutes
+
+
+def parse_minutes(value: str | int | float | None) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in {"off", "disable", "disabled", "none", "false"}:
+        return None
+    try:
+        minutes = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TelegramError("Auto-notify minutes must be a positive number, or 'off'.") from exc
+    if not math.isfinite(minutes) or minutes < 0:
+        raise TelegramError("Auto-notify minutes must be zero or greater.")
+    if minutes == 0:
+        return None
+    return minutes
+
+
+def configure_auto_notify(minutes: float | None) -> dict[str, Any]:
+    config = load_config()
+    if minutes is None:
+        config.pop("auto_notify_min_minutes", None)
+    else:
+        config["auto_notify_min_minutes"] = minutes
+    save_config(config)
+    return config
+
+
+def format_minutes(minutes: float) -> str:
+    if minutes.is_integer():
+        return str(int(minutes))
+    return f"{minutes:g}"
+
+
+def auto_notify_status_text(config: dict[str, Any] | None = None) -> str:
+    minutes = auto_notify_minutes(config)
+    if minutes is None:
+        return "off"
+    return f"tasks >= {format_minutes(minutes)} minute(s)"
 
 
 def redact(value: str | None, keep: int = 4) -> str:
@@ -197,6 +257,7 @@ def ask_yes_no(prompt: str, default: bool = True) -> bool:
 
 
 def setup(args: argparse.Namespace) -> int:
+    previous_config = load_config()
     print_header("Telegram for Codex setup")
     print(
         textwrap.fill(
@@ -241,6 +302,14 @@ def setup(args: argparse.Namespace) -> int:
         "created_at": now_iso(),
         "hooks_enabled": False,
     }
+    if auto_notify_minutes(previous_config) is not None:
+        config["auto_notify_min_minutes"] = auto_notify_minutes(previous_config)
+    if args.auto_notify_minutes is not None:
+        parsed_minutes = parse_minutes(args.auto_notify_minutes)
+        if parsed_minutes is None:
+            config.pop("auto_notify_min_minutes", None)
+        else:
+            config["auto_notify_min_minutes"] = parsed_minutes
     save_config(config)
     send_message("Telegram is linked. Codex can now send notifications here.", title="Codex Telegram setup")
     print(f"Linked chat {chat.get('id')} and sent a test message.")
@@ -294,14 +363,17 @@ def wait_for_chat(token: str, code: str, offset: int | None, timeout_seconds: in
 def status(_: argparse.Namespace) -> int:
     config = load_config()
     print_header("Telegram plugin status")
-    if not config:
+    if not is_linked(config):
         print("Not linked.")
         print(f"Config path: {config_path()}")
+        if config:
+            print(f"Auto-notify threshold: {auto_notify_status_text(config)}")
         return 1
     print(f"Bot: @{config.get('bot_username', 'unknown')}")
     print(f"Bot token: {redact(config.get('bot_token'))}")
     print(f"Chat: {config.get('chat_title') or config.get('chat_id')} ({config.get('chat_type', 'unknown')})")
     print(f"Hooks enabled: {'yes' if config.get('hooks_enabled') else 'no'}")
+    print(f"Auto-notify threshold: {auto_notify_status_text(config)}")
     print(f"Config path: {config_path()}")
     return 0
 
@@ -346,6 +418,7 @@ def notify_next(args: argparse.Namespace) -> int:
         "title": args.title or "Codex task complete",
         "prompt": args.prompt,
         "created_at": now_iso(),
+        "created_epoch": time.time(),
         "source": "manual",
     }
     path = save_pending(payload)
@@ -353,20 +426,57 @@ def notify_next(args: argparse.Namespace) -> int:
     return 0
 
 
+def auto_notify_command(args: argparse.Namespace) -> int:
+    if args.minutes is None:
+        print(f"Auto-notify threshold: {auto_notify_status_text(load_config())}")
+        print(f"Config path: {config_path()}")
+        return 0
+    minutes = parse_minutes(args.minutes)
+    config = configure_auto_notify(minutes)
+    if minutes is None:
+        print("Auto-notify disabled.")
+    else:
+        print(f"Auto-notify enabled for Codex tasks taking {format_minutes(minutes)} minute(s) or longer.")
+    if not is_linked(config):
+        print("Telegram is not linked yet. Run setup before auto notifications can send.")
+    elif not config.get("hooks_enabled"):
+        print("Codex hooks are not marked enabled. Run install-hooks and restart Codex.")
+    return 0
+
+
 def hook_user_prompt(_: argparse.Namespace) -> int:
     payload = read_stdin_json()
     prompt = str(payload.get("prompt") or "")
-    if not load_config() or not TRIGGER_RE.search(prompt):
+    config = load_config()
+    if not is_linked(config):
+        return 0
+    created_epoch = time.time()
+    base_payload = {
+        "session_id": payload.get("session_id"),
+        "turn_id": payload.get("turn_id"),
+        "prompt": prompt[:1000],
+        "cwd": payload.get("cwd"),
+        "created_at": now_iso(),
+        "created_epoch": created_epoch,
+    }
+    if TRIGGER_RE.search(prompt):
+        save_pending(
+            {
+                **base_payload,
+                "title": "Codex task complete",
+                "source": "UserPromptSubmit hook",
+            }
+        )
+        return 0
+    threshold_minutes = auto_notify_minutes(config)
+    if threshold_minutes is None:
         return 0
     save_pending(
         {
-            "session_id": payload.get("session_id"),
-            "turn_id": payload.get("turn_id"),
+            **base_payload,
             "title": "Codex task complete",
-            "prompt": prompt[:1000],
-            "cwd": payload.get("cwd"),
-            "created_at": now_iso(),
-            "source": "UserPromptSubmit hook",
+            "source": AUTO_NOTIFY_SOURCE,
+            "threshold_minutes": threshold_minutes,
         }
     )
     return 0
@@ -392,10 +502,49 @@ def send_pending_for_stop(hook_payload: dict[str, Any]) -> bool:
         pending_dir() / f"{pending_key(session_id, turn_id)}.json",
         pending_dir() / f"{pending_key(None, None)}.json",
     ]
-    pending_path = next((path for path in candidates if path.exists()), None)
-    if not pending_path:
+    for pending_path in dict.fromkeys(candidates):
+        if not pending_path.exists():
+            continue
+        pending = load_json(pending_path, {})
+        if not should_send_pending(pending):
+            pending_path.unlink(missing_ok=True)
+            continue
+        send_pending(pending_path, pending, hook_payload)
+        return True
+    return False
+
+
+def should_send_pending(pending: dict[str, Any]) -> bool:
+    if pending.get("source") != AUTO_NOTIFY_SOURCE:
+        return True
+    threshold_minutes = auto_notify_minutes()
+    if threshold_minutes is None:
         return False
-    pending = load_json(pending_path, {})
+    elapsed_minutes = elapsed_pending_minutes(pending)
+    return elapsed_minutes is not None and elapsed_minutes >= threshold_minutes
+
+
+def elapsed_pending_minutes(pending: dict[str, Any]) -> float | None:
+    created_epoch = pending.get("created_epoch")
+    try:
+        return max(0.0, (time.time() - float(created_epoch)) / 60)
+    except (TypeError, ValueError):
+        pass
+    created_at = pending.get("created_at")
+    if not created_at:
+        return None
+    try:
+        created = dt.datetime.fromisoformat(str(created_at))
+        if created.tzinfo is None:
+            created = created.astimezone()
+        return max(0.0, (dt.datetime.now(created.tzinfo) - created).total_seconds() / 60)
+    except ValueError:
+        return None
+
+
+def send_pending(pending_path: pathlib.Path, pending: dict[str, Any], hook_payload: dict[str, Any]) -> None:
+    session_id = hook_payload.get("session_id")
+    turn_id = hook_payload.get("turn_id")
     last_message = str(hook_payload.get("last_assistant_message") or "").strip()
     prompt = str(pending.get("prompt") or "").strip()
     cwd = str(hook_payload.get("cwd") or pending.get("cwd") or "").strip()
@@ -404,6 +553,11 @@ def send_pending_for_stop(hook_payload: dict[str, Any]) -> bool:
         lines.append(f"Request: {single_line(prompt, 220)}")
     if cwd:
         lines.append(f"Workspace: {cwd}")
+    if pending.get("source") == AUTO_NOTIFY_SOURCE:
+        elapsed_minutes = elapsed_pending_minutes(pending)
+        threshold_minutes = auto_notify_minutes()
+        if elapsed_minutes is not None and threshold_minutes is not None:
+            lines.append(f"Duration: {format_minutes(elapsed_minutes)} minute(s) (threshold: {format_minutes(threshold_minutes)})")
     if last_message:
         lines.append("")
         lines.append(single_line(last_message, 1500))
@@ -415,7 +569,6 @@ def send_pending_for_stop(hook_payload: dict[str, Any]) -> bool:
     pending["hook_turn_id"] = turn_id
     write_private_json(sent_path, pending)
     pending_path.unlink(missing_ok=True)
-    return True
 
 
 def single_line(value: str, limit: int) -> str:
@@ -432,9 +585,11 @@ def read_stdin_json() -> dict[str, Any]:
     return json.loads(raw)
 
 
-def install_hooks_command(_: argparse.Namespace) -> int:
+def install_hooks_command(args: argparse.Namespace) -> int:
     install_hooks()
     config = load_config()
+    if args.auto_notify_minutes is not None:
+        config = configure_auto_notify(parse_minutes(args.auto_notify_minutes))
     if config:
         config["hooks_enabled"] = True
         save_config(config)
@@ -625,7 +780,29 @@ class McpServer:
             {
                 "name": "telegram_install_hooks",
                 "description": "Install user-local Codex hooks that send Telegram completion notifications.",
-                "inputSchema": {"type": "object", "properties": {}},
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "autoNotifyMinutes": {
+                            "type": "number",
+                            "description": "Optional threshold in minutes for automatic completion notifications. Use 0 to disable.",
+                        }
+                    },
+                },
+            },
+            {
+                "name": "telegram_configure_auto_notify",
+                "description": "Configure automatic Telegram notifications for Codex tasks that take at least the given number of minutes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "minutes": {
+                            "type": "number",
+                            "description": "Threshold in minutes. Use 0 to disable automatic duration-based notifications.",
+                        }
+                    },
+                    "required": ["minutes"],
+                },
             },
         ]
 
@@ -636,14 +813,20 @@ class McpServer:
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         if name == "telegram_status":
             config = load_config()
-            if not config:
-                return {"linked": False, "setup": setup_hint()}
+            if not is_linked(config):
+                return {
+                    "linked": False,
+                    "setup": setup_hint(),
+                    "auto_notify_min_minutes": auto_notify_minutes(config),
+                    "config_path": str(config_path()),
+                }
             return {
                 "linked": True,
                 "bot_username": config.get("bot_username"),
                 "chat_title": config.get("chat_title"),
                 "chat_type": config.get("chat_type"),
                 "hooks_enabled": bool(config.get("hooks_enabled")),
+                "auto_notify_min_minutes": auto_notify_minutes(config),
                 "config_path": str(config_path()),
             }
         if name == "telegram_send_message":
@@ -656,13 +839,31 @@ class McpServer:
                     "title": arguments.get("title") or "Codex task complete",
                     "prompt": arguments.get("prompt") or "",
                     "created_at": now_iso(),
+                    "created_epoch": time.time(),
                     "source": "MCP",
                 }
             )
             return {"armed": True}
         if name == "telegram_install_hooks":
             install_hooks()
-            return {"installed": True, "hooks_path": str(codex_home() / "hooks.json")}
+            if "autoNotifyMinutes" in arguments:
+                configure_auto_notify(parse_minutes(arguments.get("autoNotifyMinutes")))
+            config = load_config()
+            if config:
+                config["hooks_enabled"] = True
+                save_config(config)
+            return {
+                "installed": True,
+                "hooks_path": str(codex_home() / "hooks.json"),
+                "auto_notify_min_minutes": auto_notify_minutes(config),
+            }
+        if name == "telegram_configure_auto_notify":
+            config = configure_auto_notify(parse_minutes(arguments.get("minutes")))
+            return {
+                "auto_notify_min_minutes": auto_notify_minutes(config),
+                "linked": is_linked(config),
+                "hooks_enabled": bool(config.get("hooks_enabled")),
+            }
         raise TelegramError(f"Unknown tool: {name}")
 
     def serve(self) -> int:
@@ -716,6 +917,10 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--timeout", type=int, default=180, help="Seconds to wait for the Telegram setup code.")
     setup_parser.add_argument("--install-hooks", action="store_true", help="Install Codex completion hooks without prompting.")
     setup_parser.add_argument("--no-hooks", action="store_true", help="Skip the hook prompt.")
+    setup_parser.add_argument(
+        "--auto-notify-minutes",
+        help="Automatically notify when any Codex task takes this many minutes or longer. Use 0 or off to disable.",
+    )
     setup_parser.set_defaults(func=setup)
 
     status_parser = sub.add_parser("status", help="Show linked bot and hook status.")
@@ -737,7 +942,15 @@ def build_parser() -> argparse.ArgumentParser:
     notify_parser.add_argument("--turn-id")
     notify_parser.set_defaults(func=notify_next)
 
+    auto_parser = sub.add_parser("auto-notify", help="Show or set the automatic task-duration notification threshold.")
+    auto_parser.add_argument("minutes", nargs="?", help="Minutes threshold. Use 0 or off to disable.")
+    auto_parser.set_defaults(func=auto_notify_command)
+
     install_parser = sub.add_parser("install-hooks", help="Install user-local Codex hooks.")
+    install_parser.add_argument(
+        "--auto-notify-minutes",
+        help="Automatically notify when any Codex task takes this many minutes or longer. Use 0 or off to disable.",
+    )
     install_parser.set_defaults(func=install_hooks_command)
 
     uninstall_parser = sub.add_parser("uninstall-hooks", help="Remove user-local Telegram hooks.")

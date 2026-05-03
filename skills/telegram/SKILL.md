@@ -92,6 +92,24 @@ If hooks are not installed, install them with:
 python3 plugins/telegram/scripts/telegram.py install-hooks
 ```
 
+For duration-based notifications on every Codex task, configure the threshold in minutes:
+
+```bash
+python3 plugins/telegram/scripts/telegram.py auto-notify 5
+```
+
+Or install hooks and set the threshold in one command:
+
+```bash
+python3 plugins/telegram/scripts/telegram.py install-hooks --auto-notify-minutes 5
+```
+
+Use this command to disable duration-based notifications:
+
+```bash
+python3 plugins/telegram/scripts/telegram.py auto-notify off
+```
+
 Hooks are user-local. The installer writes absolute script paths into `~/.codex/hooks.json` and enables `codex_hooks = true` in `~/.codex/config.toml`.
 After installing hooks, tell the user to restart Codex so the running app session loads the new hook configuration.
 
@@ -100,6 +118,7 @@ After installing hooks, tell the user to restart Codex so the running app sessio
 - `Telegram is not linked yet`: run `setup`.
 - `Timed out waiting for the setup code`: run `setup` again and send the new one-time code to the bot.
 - No automatic completion message: run `status`, then `install-hooks`, then restart Codex.
+- No duration-based completion message: run `status` and confirm the auto-notify threshold is not off; short tasks under the threshold are intentionally ignored.
 - Wrong chat: run `clear`, then `setup` again from the Telegram account or group that should receive messages.
 
 ## Privacy

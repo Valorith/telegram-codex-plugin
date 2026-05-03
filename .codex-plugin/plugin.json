@@ -1,7 +1,7 @@
 {
   "name": "telegram",
   "version": "0.1.0",
-  "description": "Send Telegram notifications from Codex, including optional task-completion alerts.",
+  "description": "Send Telegram notifications from Codex, including optional task-completion and long-task alerts.",
   "author": {
     "name": "Vayle",
     "email": "Valorith@users.noreply.github.com",
@@ -22,7 +22,7 @@
   "interface": {
     "displayName": "Telegram",
     "shortDescription": "Send task updates and completion alerts to Telegram",
-    "longDescription": "Link Codex to a personal Telegram bot and send polished notifications when tasks finish. Includes a guided first-time setup, direct message tools, and optional Codex hooks for automatic completion alerts.",
+    "longDescription": "Link Codex to a personal Telegram bot and send polished notifications when tasks finish. Includes a guided first-time setup, direct message tools, optional Codex hooks for automatic completion alerts, and a configurable long-task threshold.",
     "developerName": "Vayle",
     "category": "Productivity",
     "capabilities": [

@@ -8,6 +8,12 @@ Run:
 python3 plugins/telegram/scripts/telegram.py install-hooks
 ```
 
+To also notify automatically when any Codex task takes at least a configured number of minutes, pass a threshold:
+
+```bash
+python3 plugins/telegram/scripts/telegram.py install-hooks --auto-notify-minutes 5
+```
+
 The installer writes user-local hook entries with absolute script paths to:
 
 ```text
@@ -33,4 +39,11 @@ Use this command to remove only the Telegram hook handlers:
 
 ```bash
 python3 plugins/telegram/scripts/telegram.py uninstall-hooks
+```
+
+Change or disable the duration threshold without reinstalling hooks:
+
+```bash
+python3 plugins/telegram/scripts/telegram.py auto-notify 10
+python3 plugins/telegram/scripts/telegram.py auto-notify off
 ```

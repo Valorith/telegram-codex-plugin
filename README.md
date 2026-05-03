@@ -2,13 +2,14 @@
 
 Send Codex task updates, test messages, and completion notifications to Telegram through a bot you control.
 
-This plugin is useful when Codex is running longer tasks and you want a lightweight notification on your phone when work finishes. It includes a guided first-time setup, direct Telegram sends, and optional Codex hooks that automatically notify you when prompts like "Send me a Telegram when this task is done" complete.
+This plugin is useful when Codex is running longer tasks and you want a lightweight notification on your phone when work finishes. It includes a guided first-time setup, direct Telegram sends, optional Codex hooks that automatically notify you when prompts like "Send me a Telegram when this task is done" complete, and a configurable duration threshold for notifying on any long-running task.
 
 ## Features
 
 - Guided Telegram bot linking with `@BotFather`
 - Direct messages from Codex to your linked Telegram chat
 - Optional task-completion notifications through Codex hooks
+- Configurable auto-notify threshold for all Codex tasks that take at least a chosen number of minutes
 - MCP tools for status, sends, hook installation, and next-task notification arming
 - Local-only storage for the bot token and chat id
 - Dependency-free Python helper script
@@ -40,6 +41,8 @@ python3 scripts/telegram.py status
 python3 scripts/telegram.py test
 python3 scripts/telegram.py send "Build finished" --title "Codex"
 python3 scripts/telegram.py install-hooks
+python3 scripts/telegram.py auto-notify 5
+python3 scripts/telegram.py auto-notify off
 python3 scripts/telegram.py uninstall-hooks
 python3 scripts/telegram.py clear
 ```
@@ -52,15 +55,30 @@ When loaded by Codex, the plugin exposes:
 - `telegram_send_message`
 - `telegram_notify_next`
 - `telegram_install_hooks`
+- `telegram_configure_auto_notify`
 
 ## How Notifications Work
 
 The hook installer writes user-local entries to `~/.codex/hooks.json` and enables `codex_hooks = true` in `~/.codex/config.toml`.
 
 - `UserPromptSubmit` detects Telegram notification intent and arms the current task.
-- `Stop` sends the final completion message and clears the pending notification.
+- If auto-notify is configured, `UserPromptSubmit` also records a start time for every Codex task that was not explicitly armed.
+- `Stop` sends the final completion message and clears the pending notification. Auto-notify records only send when the elapsed task time meets or exceeds the configured threshold.
 
 Hooks are opt-in because Telegram must be linked before automatic notifications are useful.
+
+To notify for any Codex task that takes at least five minutes:
+
+```bash
+python3 scripts/telegram.py install-hooks --auto-notify-minutes 5
+```
+
+You can change the threshold later:
+
+```bash
+python3 scripts/telegram.py auto-notify 10
+python3 scripts/telegram.py auto-notify off
+```
 
 ## Privacy
 
