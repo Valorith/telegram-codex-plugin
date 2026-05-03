@@ -113,6 +113,30 @@ python3 plugins/telegram/scripts/telegram.py auto-notify off
 Hooks are user-local. The installer writes absolute script paths into `~/.codex/hooks.json` and enables `codex_hooks = true` in `~/.codex/config.toml`.
 After installing hooks, tell the user to restart Codex so the running app session loads the new hook configuration.
 
+## Plugin updates
+
+If the user asks to update or refresh the Telegram plugin, prefer the MCP tool `telegram_update_plugin` when it is available. For a preview, use `telegram_check_plugin_update`.
+
+Otherwise run:
+
+```bash
+python3 plugins/telegram/scripts/telegram.py update-plugin
+```
+
+To preview changed files without copying:
+
+```bash
+python3 plugins/telegram/scripts/telegram.py update-plugin --dry-run
+```
+
+The updater uses the plugin manifest's `repository` value by default. To point future updates at a fork or another repository, run:
+
+```bash
+python3 plugins/telegram/scripts/telegram.py update-plugin --repo https://github.com/example/telegram-codex-plugin --ref main --save-source
+```
+
+The saved update source is local user configuration under `~/.codex/telegram/config.json`; it does not affect the Telegram bot token or chat id. After a successful update, tell the user to restart Codex so the running session reloads changed plugin skills and MCP tools.
+
 ## Troubleshooting
 
 - `Telegram is not linked yet`: run `setup`.

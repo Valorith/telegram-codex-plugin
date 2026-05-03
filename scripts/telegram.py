@@ -15,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import urllib.error
@@ -26,10 +27,39 @@ PLUGIN_NAME = "telegram"
 PLUGIN_VERSION = "0.1.0"
 API_ROOT = "https://api.telegram.org"
 AUTO_NOTIFY_SOURCE = "auto-threshold"
-TRIGGER_RE = re.compile(
-    r"\b(telegram|tg)\b.*\b(notify|message|ping|alert|tell|let me know|send me)\b"
-    r"|\b(notify|message|ping|alert|tell|let me know|send me)\b.*\b(telegram|tg)\b",
-    re.IGNORECASE,
+USER_PROMPT_SOURCE = "UserPromptSubmit hook"
+PLUGIN_UPDATE_REPOSITORY_KEY = "plugin_update_repository"
+PLUGIN_UPDATE_REF_KEY = "plugin_update_ref"
+PLUGIN_OWNED_PATHS = (
+    ".codex-plugin",
+    ".mcp.json",
+    "skills",
+    "scripts",
+    "hooks",
+    "assets",
+    "README.md",
+    "LICENSE",
+)
+PLUGIN_COPY_IGNORE_NAMES = {
+    ".DS_Store",
+    ".git",
+    ".github",
+    "__pycache__",
+}
+TELEGRAM_RE = re.compile(r"\b(telegram|tg)\b", re.IGNORECASE)
+NOTIFY_INTENT_RE = re.compile(
+    r"\b(send me|notify me|ping me|alert me|message me|let me know|tell me|telegram me)\b"
+    r"|\b(send|notify|ping|alert)\b.{0,80}\b(telegram|tg)\b"
+    r"|\b(telegram|tg)\b.{0,80}\b(notify|ping|alert)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+COMPLETION_CONTEXT_RE = re.compile(
+    r"\b(when|after|once)\b.{0,120}\b(done|finished|finishes|finish|complete|completes|completed|completion|ends|ended)\b"
+    r"|\b(done|finished|complete|completed)\b.{0,80}\b(send|notify|ping|alert|message|telegram|tg|let me know|tell me)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+INTERNAL_PROMPT_PREFIXES = (
+    "You are an expert at upholding safety and compliance standards for Codex ambient suggestions.",
 )
 
 
@@ -92,6 +122,71 @@ def save_config(config: dict[str, Any]) -> None:
     write_private_json(config_path(), config)
 
 
+def plugin_root() -> pathlib.Path:
+    script_path = pathlib.Path(__file__).resolve()
+    for candidate in (script_path.parent, *script_path.parents):
+        if (candidate / ".codex-plugin" / "plugin.json").exists():
+            return candidate
+    return script_path.parent.parent
+
+
+def load_plugin_manifest(root: pathlib.Path | None = None) -> dict[str, Any]:
+    root = plugin_root() if root is None else root
+    manifest_path = root / ".codex-plugin" / "plugin.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise TelegramError(f"Could not find plugin manifest at {manifest_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise TelegramError(f"Could not parse plugin manifest at {manifest_path}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise TelegramError(f"Plugin manifest at {manifest_path} is not a JSON object.")
+    return manifest
+
+
+def configured_update_repository(config: dict[str, Any] | None = None, root: pathlib.Path | None = None) -> str:
+    config = load_config() if config is None else config
+    configured = str(config.get(PLUGIN_UPDATE_REPOSITORY_KEY) or "").strip()
+    if configured:
+        return configured
+    manifest = load_plugin_manifest(root)
+    repository = manifest.get("repository")
+    if isinstance(repository, dict):
+        repository = repository.get("url")
+    repository = str(repository or manifest.get("homepage") or "").strip()
+    if not repository:
+        raise TelegramError(
+            "No plugin update repository is configured. Add repository to .codex-plugin/plugin.json or run update-plugin with --repo."
+        )
+    return repository
+
+
+def configured_update_ref(config: dict[str, Any] | None = None) -> str | None:
+    config = load_config() if config is None else config
+    value = str(config.get(PLUGIN_UPDATE_REF_KEY) or "").strip()
+    return value or None
+
+
+def configure_plugin_update_source(repository: str | None, ref: str | None, reset: bool = False) -> dict[str, Any]:
+    config = load_config()
+    if reset:
+        config.pop(PLUGIN_UPDATE_REPOSITORY_KEY, None)
+        config.pop(PLUGIN_UPDATE_REF_KEY, None)
+    if repository is not None:
+        repository = repository.strip()
+        if not repository:
+            raise TelegramError("Update repository cannot be empty.")
+        config[PLUGIN_UPDATE_REPOSITORY_KEY] = repository
+    if ref is not None:
+        ref = ref.strip()
+        if ref:
+            config[PLUGIN_UPDATE_REF_KEY] = ref
+        else:
+            config.pop(PLUGIN_UPDATE_REF_KEY, None)
+    save_config(config)
+    return config
+
+
 def is_linked(config: dict[str, Any] | None = None) -> bool:
     config = load_config() if config is None else config
     return bool(config.get("bot_token") and config.get("chat_id"))
@@ -148,6 +243,220 @@ def auto_notify_status_text(config: dict[str, Any] | None = None) -> str:
     if minutes is None:
         return "off"
     return f"tasks >= {format_minutes(minutes)} minute(s)"
+
+
+def update_source_status(config: dict[str, Any] | None = None, root: pathlib.Path | None = None) -> dict[str, Any]:
+    config = load_config() if config is None else config
+    repository = configured_update_repository(config, root)
+    ref = configured_update_ref(config)
+    return {
+        "repository": repository,
+        "ref": ref,
+        "configured": bool(config.get(PLUGIN_UPDATE_REPOSITORY_KEY) or config.get(PLUGIN_UPDATE_REF_KEY)),
+    }
+
+
+def update_restart_notice() -> str:
+    return "Restart Codex after updating so this running session reloads changed plugin skills and MCP tools."
+
+
+def update_plugin(args: argparse.Namespace) -> int:
+    result = perform_plugin_update(
+        repository=args.repo,
+        ref=args.ref,
+        save_source=args.save_source,
+        reset_source=args.reset_source,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+    if result.get("updated"):
+        print(update_restart_notice())
+    return 0
+
+
+def perform_plugin_update(
+    repository: str | None = None,
+    ref: str | None = None,
+    save_source: bool = False,
+    reset_source: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    target_root = plugin_root()
+    if reset_source:
+        configure_plugin_update_source(None, None, reset=True)
+    config = load_config()
+    repository = (repository or configured_update_repository(config, target_root)).strip()
+    ref = (ref or configured_update_ref(config) or "").strip() or None
+
+    with tempfile.TemporaryDirectory(prefix="telegram-plugin-update-") as tmp:
+        source_root = fetch_plugin_update_source(repository, ref, pathlib.Path(tmp))
+        source_manifest = validate_plugin_update_payload(source_root)
+        if save_source:
+            configure_plugin_update_source(repository, ref, reset=False)
+        changes = diff_plugin_payload(source_root, target_root)
+        result = {
+            "repository": repository,
+            "ref": ref,
+            "target_root": str(target_root),
+            "source_version": source_manifest.get("version"),
+            "current_version": load_plugin_manifest(target_root).get("version"),
+            "changed": changes,
+            "changed_count": len(changes),
+            "dry_run": dry_run,
+            "updated": False,
+            "restart_notice": update_restart_notice(),
+        }
+        if dry_run:
+            return result
+        apply_plugin_update(source_root, target_root)
+        result["updated"] = True
+        return result
+
+
+def fetch_plugin_update_source(repository: str, ref: str | None, tmp_root: pathlib.Path) -> pathlib.Path:
+    local_path = pathlib.Path(repository).expanduser()
+    if local_path.exists():
+        if not local_path.is_dir():
+            raise TelegramError(f"Update source is not a directory: {local_path}")
+        return local_path.resolve()
+
+    git = shutil.which("git")
+    if not git:
+        raise TelegramError("Updating from a remote repository requires git on PATH. Local directory sources also work.")
+
+    destination = tmp_root / "source"
+    command = [git, "clone", "--depth", "1"]
+    if ref:
+        command.extend(["--branch", ref])
+    command.extend([repository, str(destination)])
+    completed = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or f"git clone exited with {completed.returncode}"
+        raise TelegramError(f"Could not fetch plugin update source: {detail}")
+    return destination
+
+
+def validate_plugin_update_payload(source_root: pathlib.Path) -> dict[str, Any]:
+    manifest = load_plugin_manifest(source_root)
+    if manifest.get("name") != PLUGIN_NAME:
+        raise TelegramError(
+            f"Update payload is for plugin {manifest.get('name')!r}, expected {PLUGIN_NAME!r}."
+        )
+    required_files = [
+        ".codex-plugin/plugin.json",
+        ".mcp.json",
+        "scripts/telegram.py",
+        "skills/telegram/SKILL.md",
+    ]
+    missing = [relative for relative in required_files if not (source_root / relative).is_file()]
+    if missing:
+        raise TelegramError(f"Update payload is missing required file(s): {', '.join(missing)}")
+    forbidden = [
+        "telegram/config.json",
+        ".codex/telegram/config.json",
+        "config.json",
+    ]
+    present = [relative for relative in forbidden if (source_root / relative).exists()]
+    if present:
+        raise TelegramError(f"Update payload contains user-private config file(s): {', '.join(present)}")
+    return manifest
+
+
+def diff_plugin_payload(source_root: pathlib.Path, target_root: pathlib.Path) -> list[str]:
+    source_files = collect_owned_files(source_root)
+    target_files = collect_owned_files(target_root)
+    changed: list[str] = []
+    for relative in sorted(source_files | target_files):
+        source_path = source_root / relative
+        target_path = target_root / relative
+        if not source_path.exists() or not target_path.exists():
+            changed.append(relative)
+            continue
+        if source_path.read_bytes() != target_path.read_bytes():
+            changed.append(relative)
+    return changed
+
+
+def collect_owned_files(root: pathlib.Path) -> set[str]:
+    files: set[str] = set()
+    for relative in PLUGIN_OWNED_PATHS:
+        path = root / relative
+        if not path.exists():
+            continue
+        if path.is_file():
+            files.add(relative)
+            continue
+        for current_root, dirs, filenames in os.walk(path):
+            dirs[:] = [name for name in dirs if name not in PLUGIN_COPY_IGNORE_NAMES]
+            for filename in filenames:
+                if filename in PLUGIN_COPY_IGNORE_NAMES:
+                    continue
+                file_path = pathlib.Path(current_root) / filename
+                files.add(file_path.relative_to(root).as_posix())
+    return files
+
+
+def apply_plugin_update(source_root: pathlib.Path, target_root: pathlib.Path) -> None:
+    validate_plugin_update_payload(source_root)
+    for relative in PLUGIN_OWNED_PATHS:
+        source_path = source_root / relative
+        target_path = target_root / relative
+        if not source_path.exists():
+            if target_path.exists():
+                remove_path(target_path)
+            continue
+        if source_path.is_file():
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target_path)
+            continue
+        mirror_directory(source_path, target_path)
+
+
+def mirror_directory(source: pathlib.Path, target: pathlib.Path) -> None:
+    target.mkdir(parents=True, exist_ok=True)
+    source_files = collect_relative_files(source)
+    target_files = collect_relative_files(target)
+    for relative in sorted(target_files - source_files, reverse=True):
+        remove_path(target / relative)
+    for relative in sorted(source_files):
+        source_file = source / relative
+        target_file = target / relative
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_file, target_file)
+    remove_empty_dirs(target)
+
+
+def collect_relative_files(root: pathlib.Path) -> set[pathlib.Path]:
+    files: set[pathlib.Path] = set()
+    if not root.exists():
+        return files
+    for current_root, dirs, filenames in os.walk(root):
+        dirs[:] = [name for name in dirs if name not in PLUGIN_COPY_IGNORE_NAMES]
+        for filename in filenames:
+            if filename in PLUGIN_COPY_IGNORE_NAMES:
+                continue
+            file_path = pathlib.Path(current_root) / filename
+            files.add(file_path.relative_to(root))
+    return files
+
+
+def remove_empty_dirs(root: pathlib.Path) -> None:
+    if not root.exists() or not root.is_dir():
+        return
+    for current_root, dirs, _ in os.walk(root, topdown=False):
+        for dirname in dirs:
+            path = pathlib.Path(current_root) / dirname
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+
+
+def remove_path(path: pathlib.Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def redact(value: str | None, keep: int = 4) -> str:
@@ -304,6 +613,9 @@ def setup(args: argparse.Namespace) -> int:
     }
     if auto_notify_minutes(previous_config) is not None:
         config["auto_notify_min_minutes"] = auto_notify_minutes(previous_config)
+    for key in (PLUGIN_UPDATE_REPOSITORY_KEY, PLUGIN_UPDATE_REF_KEY):
+        if previous_config.get(key):
+            config[key] = previous_config[key]
     if args.auto_notify_minutes is not None:
         parsed_minutes = parse_minutes(args.auto_notify_minutes)
         if parsed_minutes is None:
@@ -363,8 +675,11 @@ def wait_for_chat(token: str, code: str, offset: int | None, timeout_seconds: in
 def status(_: argparse.Namespace) -> int:
     config = load_config()
     print_header("Telegram plugin status")
+    update_source = update_source_status(config)
     if not is_linked(config):
         print("Not linked.")
+        print(f"Update repository: {update_source['repository']}")
+        print(f"Update ref: {update_source['ref'] or 'default branch'}")
         print(f"Config path: {config_path()}")
         if config:
             print(f"Auto-notify threshold: {auto_notify_status_text(config)}")
@@ -374,6 +689,8 @@ def status(_: argparse.Namespace) -> int:
     print(f"Chat: {config.get('chat_title') or config.get('chat_id')} ({config.get('chat_type', 'unknown')})")
     print(f"Hooks enabled: {'yes' if config.get('hooks_enabled') else 'no'}")
     print(f"Auto-notify threshold: {auto_notify_status_text(config)}")
+    print(f"Update repository: {update_source['repository']}")
+    print(f"Update ref: {update_source['ref'] or 'default branch'}")
     print(f"Config path: {config_path()}")
     return 0
 
@@ -450,6 +767,9 @@ def hook_user_prompt(_: argparse.Namespace) -> int:
     config = load_config()
     if not is_linked(config):
         return 0
+    cwd = str(payload.get("cwd") or "")
+    if should_ignore_prompt(prompt, cwd):
+        return 0
     created_epoch = time.time()
     base_payload = {
         "session_id": payload.get("session_id"),
@@ -459,12 +779,12 @@ def hook_user_prompt(_: argparse.Namespace) -> int:
         "created_at": now_iso(),
         "created_epoch": created_epoch,
     }
-    if TRIGGER_RE.search(prompt):
+    if has_telegram_completion_intent(prompt):
         save_pending(
             {
                 **base_payload,
                 "title": "Codex task complete",
-                "source": "UserPromptSubmit hook",
+                "source": USER_PROMPT_SOURCE,
             }
         )
         return 0
@@ -515,6 +835,10 @@ def send_pending_for_stop(hook_payload: dict[str, Any]) -> bool:
 
 
 def should_send_pending(pending: dict[str, Any]) -> bool:
+    if pending.get("source") == USER_PROMPT_SOURCE:
+        prompt = str(pending.get("prompt") or "")
+        cwd = str(pending.get("cwd") or "")
+        return not should_ignore_prompt(prompt, cwd) and has_telegram_completion_intent(prompt)
     if pending.get("source") != AUTO_NOTIFY_SOURCE:
         return True
     threshold_minutes = auto_notify_minutes()
@@ -576,6 +900,23 @@ def single_line(value: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def should_ignore_prompt(prompt: str, cwd: str | None = None) -> bool:
+    stripped = prompt.lstrip()
+    if any(stripped.startswith(prefix) for prefix in INTERNAL_PROMPT_PREFIXES):
+        return True
+    return False
+
+
+def has_telegram_completion_intent(prompt: str) -> bool:
+    if should_ignore_prompt(prompt):
+        return False
+    if not TELEGRAM_RE.search(prompt):
+        return False
+    if not NOTIFY_INTENT_RE.search(prompt):
+        return False
+    return bool(COMPLETION_CONTEXT_RE.search(prompt))
 
 
 def read_stdin_json() -> dict[str, Any]:
@@ -804,6 +1145,30 @@ class McpServer:
                     "required": ["minutes"],
                 },
             },
+            {
+                "name": "telegram_check_plugin_update",
+                "description": "Fetch and validate the configured Telegram plugin update source, then report changed files without copying.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repository": {"type": "string", "description": "Optional repository URL or local plugin directory."},
+                        "ref": {"type": "string", "description": "Optional branch, tag, or commit."},
+                    },
+                },
+            },
+            {
+                "name": "telegram_update_plugin",
+                "description": "Update this installed Telegram plugin from the configured repository. Restart Codex afterward to reload changed plugin files.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repository": {"type": "string", "description": "Optional repository URL or local plugin directory."},
+                        "ref": {"type": "string", "description": "Optional branch, tag, or commit."},
+                        "saveSource": {"type": "boolean", "description": "Persist repository/ref as the default update source."},
+                        "resetSource": {"type": "boolean", "description": "Clear saved source overrides before updating."},
+                    },
+                },
+            },
         ]
 
     def _content(self, result: Any) -> dict[str, Any]:
@@ -813,12 +1178,14 @@ class McpServer:
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         if name == "telegram_status":
             config = load_config()
+            update_source = update_source_status(config)
             if not is_linked(config):
                 return {
                     "linked": False,
                     "setup": setup_hint(),
                     "auto_notify_min_minutes": auto_notify_minutes(config),
                     "config_path": str(config_path()),
+                    "plugin_update": update_source,
                 }
             return {
                 "linked": True,
@@ -828,6 +1195,7 @@ class McpServer:
                 "hooks_enabled": bool(config.get("hooks_enabled")),
                 "auto_notify_min_minutes": auto_notify_minutes(config),
                 "config_path": str(config_path()),
+                "plugin_update": update_source,
             }
         if name == "telegram_send_message":
             return send_message(str(arguments["message"]), title=arguments.get("title") or "Codex")
@@ -864,6 +1232,20 @@ class McpServer:
                 "linked": is_linked(config),
                 "hooks_enabled": bool(config.get("hooks_enabled")),
             }
+        if name == "telegram_check_plugin_update":
+            return perform_plugin_update(
+                repository=arguments.get("repository"),
+                ref=arguments.get("ref"),
+                dry_run=True,
+            )
+        if name == "telegram_update_plugin":
+            return perform_plugin_update(
+                repository=arguments.get("repository"),
+                ref=arguments.get("ref"),
+                save_source=bool(arguments.get("saveSource")),
+                reset_source=bool(arguments.get("resetSource")),
+                dry_run=False,
+            )
         raise TelegramError(f"Unknown tool: {name}")
 
     def serve(self) -> int:
@@ -945,6 +1327,14 @@ def build_parser() -> argparse.ArgumentParser:
     auto_parser = sub.add_parser("auto-notify", help="Show or set the automatic task-duration notification threshold.")
     auto_parser.add_argument("minutes", nargs="?", help="Minutes threshold. Use 0 or off to disable.")
     auto_parser.set_defaults(func=auto_notify_command)
+
+    update_parser = sub.add_parser("update-plugin", help="Update this installed Telegram plugin from its configured repository.")
+    update_parser.add_argument("--repo", help="Repository URL or local plugin directory to use for this update.")
+    update_parser.add_argument("--ref", help="Branch, tag, or commit to fetch. Defaults to the configured ref or repository default branch.")
+    update_parser.add_argument("--save-source", action="store_true", help="Persist --repo and/or --ref as the default update source.")
+    update_parser.add_argument("--reset-source", action="store_true", help="Clear the saved update source before resolving defaults.")
+    update_parser.add_argument("--dry-run", action="store_true", help="Fetch and validate the update, then list changed files without copying.")
+    update_parser.set_defaults(func=update_plugin)
 
     install_parser = sub.add_parser("install-hooks", help="Install user-local Codex hooks.")
     install_parser.add_argument(

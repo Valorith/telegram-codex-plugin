@@ -10,7 +10,8 @@ This plugin is useful when Codex is running longer tasks and you want a lightwei
 - Direct messages from Codex to your linked Telegram chat
 - Optional task-completion notifications through Codex hooks
 - Configurable auto-notify threshold for all Codex tasks that take at least a chosen number of minutes
-- MCP tools for status, sends, hook installation, and next-task notification arming
+- Self-update command that validates and refreshes installed plugin files from a configured repository
+- MCP tools for status, sends, hook installation, next-task notification arming, and plugin updates
 - Local-only storage for the bot token and chat id
 - Dependency-free Python helper script
 
@@ -43,6 +44,9 @@ python3 scripts/telegram.py send "Build finished" --title "Codex"
 python3 scripts/telegram.py install-hooks
 python3 scripts/telegram.py auto-notify 5
 python3 scripts/telegram.py auto-notify off
+python3 scripts/telegram.py update-plugin --dry-run
+python3 scripts/telegram.py update-plugin
+python3 scripts/telegram.py update-plugin --repo https://github.com/Valorith/telegram-codex-plugin --save-source
 python3 scripts/telegram.py uninstall-hooks
 python3 scripts/telegram.py clear
 ```
@@ -56,6 +60,36 @@ When loaded by Codex, the plugin exposes:
 - `telegram_notify_next`
 - `telegram_install_hooks`
 - `telegram_configure_auto_notify`
+- `telegram_check_plugin_update`
+- `telegram_update_plugin`
+
+## Plugin Updates
+
+The updater refreshes the current Telegram plugin files from the configured repository. By default it reads `.codex-plugin/plugin.json` and uses the `repository` value, currently `https://github.com/Valorith/telegram-codex-plugin`.
+
+Remote repository updates use `git` on PATH. Local directory update sources also work.
+
+Preview an update before copying files:
+
+```bash
+python3 scripts/telegram.py update-plugin --dry-run
+```
+
+Apply the update:
+
+```bash
+python3 scripts/telegram.py update-plugin
+```
+
+To use a fork or another repository for future updates:
+
+```bash
+python3 scripts/telegram.py update-plugin --repo https://github.com/example/telegram-codex-plugin --ref main --save-source
+```
+
+The saved update source is stored locally under `~/.codex/telegram/config.json`. Before copying, the updater validates that the source is a Telegram plugin and contains the expected manifest, MCP config, script, and skill files. It only copies plugin-owned files and does not touch the Telegram bot token or chat id.
+
+After updating, restart Codex so the running session reloads changed plugin skills and MCP tools.
 
 ## How Notifications Work
 
