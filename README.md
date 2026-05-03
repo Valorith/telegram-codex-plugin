@@ -65,7 +65,9 @@ When loaded by Codex, the plugin exposes:
 
 ## Plugin Updates
 
-The updater refreshes the current Telegram plugin files from the configured repository. By default it reads `.codex-plugin/plugin.json` and uses the `repository` value, currently `https://github.com/Valorith/telegram-codex-plugin`.
+The updater refreshes the current Telegram plugin files from the configured repository. It does not use GitHub releases, tags, package versions, or plugin manifest versions to decide whether an update is needed. It fetches the configured repository/ref, compares the upstream plugin-owned files against the local plugin files, and copies changes when you apply the update.
+
+By default it reads `.codex-plugin/plugin.json` and uses the `repository` value, currently `https://github.com/Valorith/telegram-codex-plugin`.
 
 Remote repository updates use `git` on PATH. Local directory update sources also work.
 

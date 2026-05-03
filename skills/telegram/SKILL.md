@@ -129,6 +129,8 @@ To preview changed files without copying:
 python3 plugins/telegram/scripts/telegram.py update-plugin --dry-run
 ```
 
+The updater does not use GitHub releases, tags, package versions, or plugin manifest versions to decide whether an update is needed. It fetches the configured repository/ref, compares upstream plugin-owned files against the local plugin files, and copies changes when applied.
+
 The updater uses the plugin manifest's `repository` value by default. To point future updates at a fork or another repository, run:
 
 ```bash

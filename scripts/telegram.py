@@ -26,6 +26,8 @@ from typing import Any
 PLUGIN_NAME = "telegram"
 PLUGIN_VERSION = "0.1.0"
 API_ROOT = "https://api.telegram.org"
+MESSAGE_BODY_LIMIT = 3300
+COMPLETION_RESULT_LIMIT = 1500
 AUTO_NOTIFY_SOURCE = "auto-threshold"
 USER_PROMPT_SOURCE = "UserPromptSubmit hook"
 PLUGIN_UPDATE_REPOSITORY_KEY = "plugin_update_repository"
@@ -238,6 +240,12 @@ def format_minutes(minutes: float) -> str:
     return f"{minutes:g}"
 
 
+def format_duration(minutes: float) -> str:
+    amount = format_minutes(minutes)
+    unit = "minute" if amount == "1" else "minutes"
+    return f"{amount} {unit}"
+
+
 def auto_notify_status_text(config: dict[str, Any] | None = None) -> str:
     minutes = auto_notify_minutes(config)
     if minutes is None:
@@ -290,7 +298,7 @@ def perform_plugin_update(
 
     with tempfile.TemporaryDirectory(prefix="telegram-plugin-update-") as tmp:
         source_root = fetch_plugin_update_source(repository, ref, pathlib.Path(tmp))
-        source_manifest = validate_plugin_update_payload(source_root)
+        validate_plugin_update_payload(source_root)
         if save_source:
             configure_plugin_update_source(repository, ref, reset=False)
         changes = diff_plugin_payload(source_root, target_root)
@@ -298,8 +306,6 @@ def perform_plugin_update(
             "repository": repository,
             "ref": ref,
             "target_root": str(target_root),
-            "source_version": source_manifest.get("version"),
-            "current_version": load_plugin_manifest(target_root).get("version"),
             "changed": changes,
             "changed_count": len(changes),
             "dry_run": dry_run,
@@ -529,13 +535,7 @@ def send_message(text: str, title: str | None = None, disable_preview: bool = Tr
     if not chat_id:
         raise TelegramError("Telegram is not linked to a chat yet. Run setup first.")
     rendered = render_message(text, title=title)
-    payload = {
-        "chat_id": str(chat_id),
-        "text": rendered,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": "true" if disable_preview else "false",
-    }
-    result = api_call("sendMessage", payload)
+    result = send_rendered_message(rendered, chat_id=chat_id, disable_preview=disable_preview)
     return {
         "ok": True,
         "chat_id": chat_id,
@@ -543,12 +543,51 @@ def send_message(text: str, title: str | None = None, disable_preview: bool = Tr
     }
 
 
+def send_rendered_message(rendered: str, chat_id: Any, disable_preview: bool = True) -> dict[str, Any]:
+    payload = {
+        "chat_id": str(chat_id),
+        "text": rendered,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true" if disable_preview else "false",
+    }
+    return api_call("sendMessage", payload)
+
+
 def render_message(text: str, title: str | None = None) -> str:
     clean_text = text.strip() or "Codex finished a task."
-    if len(clean_text) > 3300:
-        clean_text = clean_text[:3290].rstrip() + "..."
+    if len(clean_text) > MESSAGE_BODY_LIMIT:
+        clean_text = clean_text[: MESSAGE_BODY_LIMIT - 10].rstrip() + "..."
     title = title.strip() if title else "Codex"
-    return f"<b>{html.escape(title)}</b>\n{html.escape(clean_text)}"
+    return f"<b>{html.escape(title)}</b>\n\n{html.escape(clean_text)}"
+
+
+def render_completion_message(
+    *,
+    title: str,
+    request: str = "",
+    workspace: str = "",
+    duration: str = "",
+    result: str = "",
+) -> str:
+    sections: list[tuple[str, str, bool]] = []
+    if request:
+        sections.append(("Request", request, False))
+    if workspace:
+        sections.append(("Workspace", workspace, True))
+    if duration:
+        sections.append(("Duration", duration, False))
+    if result:
+        sections.append(("Result", result, False))
+    if not sections:
+        return render_message("Codex finished the task.", title=title)
+
+    rendered_sections = []
+    for label, value, monospace in sections:
+        escaped_value = html.escape(value.strip())
+        if monospace:
+            escaped_value = f"<code>{escaped_value}</code>"
+        rendered_sections.append(f"<b>{html.escape(label)}</b>\n{escaped_value}")
+    return f"<b>{html.escape(title.strip() or 'Codex task complete')}</b>\n\n" + "\n\n".join(rendered_sections)
 
 
 def print_header(title: str) -> None:
@@ -872,20 +911,24 @@ def send_pending(pending_path: pathlib.Path, pending: dict[str, Any], hook_paylo
     last_message = str(hook_payload.get("last_assistant_message") or "").strip()
     prompt = str(pending.get("prompt") or "").strip()
     cwd = str(hook_payload.get("cwd") or pending.get("cwd") or "").strip()
-    lines = []
-    if prompt:
-        lines.append(f"Request: {single_line(prompt, 220)}")
-    if cwd:
-        lines.append(f"Workspace: {cwd}")
+    duration = ""
     if pending.get("source") == AUTO_NOTIFY_SOURCE:
         elapsed_minutes = elapsed_pending_minutes(pending)
         threshold_minutes = auto_notify_minutes()
         if elapsed_minutes is not None and threshold_minutes is not None:
-            lines.append(f"Duration: {format_minutes(elapsed_minutes)} minute(s) (threshold: {format_minutes(threshold_minutes)})")
-    if last_message:
-        lines.append("")
-        lines.append(single_line(last_message, 1500))
-    send_message("\n".join(lines) or "Codex finished the task.", title=str(pending.get("title") or "Codex task complete"))
+            duration = f"{format_duration(elapsed_minutes)} elapsed; threshold was {format_duration(threshold_minutes)}"
+    rendered = render_completion_message(
+        title=str(pending.get("title") or "Codex task complete"),
+        request=single_line(prompt, 220) if prompt else "",
+        workspace=cwd,
+        duration=duration,
+        result=single_line(last_message, COMPLETION_RESULT_LIMIT) if last_message else "",
+    )
+    config = load_config()
+    chat_id = config.get("chat_id")
+    if not chat_id:
+        raise TelegramError("Telegram is not linked to a chat yet. Run setup first.")
+    send_rendered_message(rendered, chat_id=chat_id)
     ensure_private_dir(sent_dir())
     sent_path = sent_dir() / f"{pending_path.stem}-{int(time.time())}.json"
     pending["sent_at"] = now_iso()
